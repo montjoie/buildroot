@@ -6,6 +6,13 @@
 # Debian ifupdown needs the /run/network lock directory
 mkdir -p /run/network
 
+grep nfs /proc/mounts
+if [ $? -eq 0 ];then
+	echo "DEBUG: rootfs is on NFS, no network change"
+	exit 0
+fi
+sleep 6
+
 case "$1" in
   start)
 	printf "Starting network: "
