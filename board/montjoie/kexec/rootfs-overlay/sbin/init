@@ -1,0 +1,170 @@
+#!/bin/sh
+
+echo "/ #"
+
+sleep 5
+
+DEBUG=0
+STEP=0
+SERVERIP=""
+BOOTARGS=""
+HAVEDTB=0
+echo "U-boot fake 08-04-2020 15:16"
+
+echo "DEBUG: mounting /proc"
+mount -t proc none /proc
+echo "DEBUG: mounting /sys"
+mount -t sysfs none /sys
+echo "DEBUG: mounting /tmp"
+mount -t tmpfs none /tmp
+
+echo "DEBUG: verify KEXEC"
+zgrep KEXEC /proc/config.gz
+kexec --version
+kexec -h
+
+echo "DEBUG: dump IOMEM"
+cat /proc/iomem
+
+echo "DEBUG: DTC"
+dtc --version
+dtc --sort -I fs /proc/device-tree/ > /tmp/dtb.current
+
+echo "Hit any key to stop autoboot kexec"
+KEXEC_OPTS="--debug --kexec-syscall --force"
+
+while read line
+do
+	if [ $STEP -eq 0 ];then
+		STEP=1
+	else
+		ACTION=$(echo $line | cut -d' ' -f1)
+		echo "DEBUG: handle $ACTION ($line)"
+		case $ACTION in
+		shell)
+			ACTIONS=$(echo $line | cut -d' ' -f2-)
+			$ACTIONS
+		;;
+		debug)
+			echo "DEBUG: enable debug mode"
+			DEBUG=1
+		;;
+		dhcp)
+			grep -q dhcp /proc/cmdline
+			if [ $? -eq 0 ];then
+				echo "DEBUG: kernel started with ip=dhcp: GOOD"
+			else
+				echo "DEBUG: kernel not started with ip=dhcp: BAD"
+			fi
+		;;
+		setenv)
+			OPT=$(echo $line | cut -d' ' -f2)
+			case $OPT in
+			serverip)
+				SERVERIP=$(echo $line | cut -d' ' -f3-)
+				echo "DEBUG: set serverip to $SERVERIP"
+			;;
+			bootargs)
+				BOOTARGS=$(echo $line | cut -d' ' -f3-)
+				echo "DEBUG: set bootargs to $BOOTARGS"
+				KEXEC_OPTS="$KEXEC_OPTS --command-line=$BOOTARGS"
+			;;
+			*)
+				echo "DEBUG: ignoring $OPT"
+			;;
+			esac
+		;;
+		tftp)
+			FROM=$(echo $line | cut -d' ' -f3)
+			TFTP_TO=""
+			echo $line | grep -qE '/dtb/|.dtb$'
+			if [ $? -eq 0 ];then
+				TFTP_TO="dtb"
+				KEXEC_OPTS="$KEXEC_OPTS --dtb /tmp/dtb"
+				HAVEDTB=1
+			fi
+			echo $line | grep -qE '/kernel/|Image'
+			if [ $? -eq 0 ];then
+				TFTP_TO="kernel"
+			fi
+			echo $line | grep -qE '/ramdisk/|rootfs.cpio.gz'
+			if [ $? -eq 0 ];then
+				TFTP_TO="ramdisk"
+				KEXEC_OPTS="$KEXEC_OPTS --initrd /tmp/ramdisk"
+			fi
+			if [ -z "$TFTP_TO" ];then
+				echo "ERROR: I dont know where to download"
+				if [ $DEBUG -eq 0 ];then
+					echo "Must RESET board to recover"
+					exit 1
+				fi
+			fi
+			echo "DEBUG: download $TFTP_TO from tftp://$SERVERIP/$FROM"
+			curl tftp://$SERVERIP/$FROM --output - > /tmp/$TFTP_TO
+			if [ $? -ne 0 ];then
+				echo "ERROR: with wget"
+				if [ $DEBUG -eq 0 ];then
+					echo "Must RESET board to recover"
+					exit 1
+				fi
+			fi
+			ls -l /tmp/$TFTP_TO
+			file /tmp/$TFTP_TO
+			echo $line | grep -qE '/ramdisk/|rootfs.cpio.gz'
+			if [ $? -eq 0 ];then
+				file /tmp/$TFTP_TO |grep -q 'u-boot legacy'
+				if [ $? -eq 0 ];then
+					echo "INFO: fallback to normal rootfs"
+					mv /tmp/ramdisk /tmp/ramdisk.old
+					if [ $? -ne 0 ];then
+						echo "ERROR: fail to move ramdisk"
+						exit 1
+					fi
+					echo "DEBUG: strip"
+					#dd if=/tmp/ramdisk.old of=/tmp/ramdisk bs=1 skip=64
+					tail -c +65 /tmp/ramdisk.old > /tmp/ramdisk
+					if [ $? -ne 0 ];then
+						echo "ERROR: fail to strip ramdisk"
+						exit 1
+					fi
+					file /tmp/ramdisk
+				else
+					echo "DEBUG: rootfs should be modified by LAVA!"
+				fi
+			fi
+			echo $line | grep -qE '/dtb/|.dtb$'
+			if [ $? -eq 0 ];then
+				echo "DEBUG: patch DTB with memory"
+				fdtput -c /tmp/dtb '/memory'
+				fdtput dtb.test --type s '/memory' 'device_type' 'memory'
+				fdtput dtb.test --type x '/memory' 'reg' 0x00 0x20000000 0x00 0x80000000
+				#echo "DEBUG: patch DTB with mac addr"
+				#fdtput dtb.test --type ux '/soc/ethernet@1c50000' 'local-mac-address' 02 53 72 0d 43 5b
+			fi
+		;;
+		bootz)
+			if [ $HAVEDTB -eq 1 ];then
+				echo "DEBUG: diff dtb"
+				dtc --sort -I dtb /tmp/dtb > /tmp/dtb.job
+				diff -u /tmp/dtb.job /tmp/dtb.current
+			fi
+			echo "DEBUG: bootz: run kexec with $KEXEC_OPTS"
+			#kexec --debug --no-checks --force --mem-min 0x30000000 --mem-max 0x9fffffff /tmp/kernel $KEXEC_OPTS
+			kexec /tmp/kernel $KEXEC_OPTS
+		;;
+		bootm)
+			echo "DEBUG: run kexec with $KEXEC_OPTS"
+			kexec --debug --force /tmp/kernel $KEXEC_OPTS
+		;;
+		booti)
+			echo "DEBUG: run kexec with $KEXEC_OPTS"
+			kexec -f /tmp/kernel $KEXEC_OPTS
+		;;
+		*)
+			echo "DEBUG: ignoring $ACTION"
+		;;
+		esac
+	fi
+	echo "=>"
+done
+

@@ -1,0 +1,8 @@
+fdt_high=ffffffff
+setenv bootargs console=ttyS0,115200 earlyprintk root=/dev/ram0 rootwait ip=dhcp earlycon=uart,mmio32,0x7000000 crashkernel=1G
+setenv ethaddr de:9d:b8:12:e3:47
+ext4load mmc 0 0x22000000 boot/zImage
+ext4load mmc 0 0x23000000 boot/sun9i-a80-cubieboard4.dtb
+ext4load mmc 0 0x2a000000 boot/rootfs.cpio.gz
+bootz 0x22000000 0x2a000000 0x23000000
+
