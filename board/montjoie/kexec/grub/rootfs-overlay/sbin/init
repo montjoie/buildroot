@@ -1,0 +1,114 @@
+#!/bin/sh
+
+debug() {
+	if [ $DEBUG -ge 1 ];then
+		echo "$*"
+	fi
+}
+
+DEBUG=0
+STEP=0
+SERVERIP=""
+BOOTARGS="earlyprintk"
+echo "GRUB fake 26-05-2020 10:28"
+
+debug "DEBUG: mounting /proc"
+mount -t proc none /proc
+debug "DEBUG: mounting /sys"
+mount -t sysfs none /sys
+debug "DEBUG: mounting /tmp"
+mount -t tmpfs none /tmp
+
+debug "DEBUG: verify KEXEC"
+zgrep -q CONFIG_KEXEC=y /proc/config.gz
+if [ $? -ne 0 ];then
+	echo "ERROR: No KEXEC"
+fi
+kexec --version
+if [ $DEBUG -ge 1 ];then
+	kexec -h
+fi
+
+
+#echo "Press enter to boot the selected OS, e to edit the commands"
+KEXEC_OPTS="--kexec-syscall --force"
+if [ $DEBUG -ge 1 ];then
+	KEXEC_OPTS="$KEXEC_OPTS --debug"
+fi
+
+echo 'grub>'
+while read line
+do
+		ACTION=$(echo $line | cut -d' ' -f1)
+		debug "DEBUG: handle $ACTION ($line)"
+		if [ "$ACTION" == 'initrd' ];then
+			ACTION="linux"
+		fi
+		case $ACTION in
+		shell)
+			ACTIONS=$(echo $line | cut -d' ' -f2-)
+			$ACTIONS
+		;;
+		debug)
+			echo "DEBUG: enable debug mode"
+			DEBUG=1
+		;;
+		linux)
+			S=$(echo $line | cut -d'(' -f2 | cut -d ')' -f1)
+			SERVERIP=$(echo $S | cut -d, -f2)
+			PROTO=$(echo $S | cut -d, -f1)
+			echo "DEBUG: $PROTO $SERVERIP"
+			case $PROTO in
+			tftp)
+				echo "$line" |grep -qE 'rootfs|ramdisk'
+				if [ $? -eq 0 ];then
+					echo "DEBUG; handle ramdisk"
+					FROM=$(echo $line | cut -d')' -f2)
+					TFTP_TO="ramdisk"
+					KEXEC_OPTS="$KEXEC_OPTS --initrd /tmp/ramdisk"
+					echo "DEBUG: FROM=$FROM"
+				fi
+				echo "$line" |grep -q bzImage
+				if [ $? -eq 0 ];then
+					echo "DEBUG; handle kernel"
+					FROM=$(echo $line | cut -d')' -f2 | cut -d' ' -f1)
+					TFTP_TO="kernel"
+					# get cmdline
+					BOOTARGS="$(echo $line | cut -d' ' -f3-)"
+					echo "DEBUG: FROM=$FROM"
+					echo "DEBUG: BOOTARGS=$BOOTARGS"
+				fi
+				if [ -z "$FROM" ];then
+					echo "ERROR: FROM is empty"
+				fi
+				echo "DEBUG: download $TFTP_TO from tftp://$SERVERIP/$FROM"
+				curl --no-progress-meter tftp://$SERVERIP/$FROM --output - > /tmp/$TFTP_TO
+				if [ $? -ne 0 ];then
+					echo "ERROR: with curl"
+					if [ $DEBUG -eq 0 ];then
+						echo "Must RESET board to recover"
+						exit 1
+					fi
+				fi
+				if [ $DEBUG -ge 1 ];then
+					ls -l /tmp/$TFTP_TO
+					file /tmp/$TFTP_TO
+				fi
+			;;
+			*)
+					echo "ERROR: unknown proto $PROTO"
+			;;
+			esac
+		;;
+		boot)
+			echo "DEBUG: bootz: run kexec with $KEXEC_OPTS"
+			kexec /tmp/kernel $KEXEC_OPTS --command-line="$BOOTARGS"
+		;;
+		*)
+			echo "DEBUG: ignoring $ACTION"
+		;;
+		esac
+	echo 'grub>'
+done
+
+echo "NEVER SAW THIS"
