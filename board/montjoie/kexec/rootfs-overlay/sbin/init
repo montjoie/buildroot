@@ -1,5 +1,11 @@
 #!/bin/sh
 
+debug() {
+	if [ $DEBUG -ge 1 ];then
+		echo "$*"
+	fi
+}
+
 echo "/ #"
 
 sleep 5
@@ -9,29 +15,34 @@ STEP=0
 SERVERIP=""
 BOOTARGS=""
 HAVEDTB=0
-echo "U-boot fake 08-04-2020 15:16"
+echo "U-boot fake 10-05-2020 11:00"
 
-echo "DEBUG: mounting /proc"
+debug "DEBUG: mounting /proc"
 mount -t proc none /proc
-echo "DEBUG: mounting /sys"
+debug "DEBUG: mounting /sys"
 mount -t sysfs none /sys
-echo "DEBUG: mounting /tmp"
+debug "DEBUG: mounting /tmp"
 mount -t tmpfs none /tmp
 
-echo "DEBUG: verify KEXEC"
-zgrep KEXEC /proc/config.gz
+debug "DEBUG: verify KEXEC"
+zgrep CONFIG_KEXEC=y /proc/config.gz
 kexec --version
-kexec -h
+if [ $DEBUG -ge 1 ];then
+	kexec -h
+fi
 
-echo "DEBUG: dump IOMEM"
-cat /proc/iomem
+#debug "DEBUG: dump IOMEM"
+#cat /proc/iomem
 
 echo "DEBUG: DTC"
 dtc --version
-dtc --sort -I fs /proc/device-tree/ > /tmp/dtb.current
+dtc -q --sort -I fs /proc/device-tree/ > /tmp/dtb.current
 
 echo "Hit any key to stop autoboot kexec"
-KEXEC_OPTS="--debug --kexec-syscall --force"
+KEXEC_OPTS="--kexec-syscall --force"
+if [ $DEBUG -ge 1 ];then
+	KEXEC_OPTS="$KEXEC_OPTS --debug"
+fi
 
 while read line
 do
@@ -67,7 +78,6 @@ do
 			bootargs)
 				BOOTARGS=$(echo $line | cut -d' ' -f3-)
 				echo "DEBUG: set bootargs to $BOOTARGS"
-				KEXEC_OPTS="$KEXEC_OPTS --command-line=$BOOTARGS"
 			;;
 			*)
 				echo "DEBUG: ignoring $OPT"
@@ -100,7 +110,7 @@ do
 				fi
 			fi
 			echo "DEBUG: download $TFTP_TO from tftp://$SERVERIP/$FROM"
-			curl tftp://$SERVERIP/$FROM --output - > /tmp/$TFTP_TO
+			curl --no-progress-meter tftp://$SERVERIP/$FROM --output - > /tmp/$TFTP_TO
 			if [ $? -ne 0 ];then
 				echo "ERROR: with wget"
 				if [ $DEBUG -eq 0 ];then
@@ -108,8 +118,10 @@ do
 					exit 1
 				fi
 			fi
-			ls -l /tmp/$TFTP_TO
-			file /tmp/$TFTP_TO
+			if [ $DEBUG -ge 1 ];then
+				ls -l --color=never /tmp/$TFTP_TO
+				file /tmp/$TFTP_TO
+			fi
 			echo $line | grep -qE '/ramdisk/|rootfs.cpio.gz'
 			if [ $? -eq 0 ];then
 				file /tmp/$TFTP_TO |grep -q 'u-boot legacy'
@@ -136,21 +148,25 @@ do
 			if [ $? -eq 0 ];then
 				echo "DEBUG: patch DTB with memory"
 				fdtput -c /tmp/dtb '/memory'
-				fdtput dtb.test --type s '/memory' 'device_type' 'memory'
-				fdtput dtb.test --type x '/memory' 'reg' 0x00 0x20000000 0x00 0x80000000
+				fdtput /tmp/dtb --type s '/memory' 'device_type' 'memory'
+				fdtput /tmp/dtb --type x '/memory' 'reg' 0x00 0x20000000 0x00 0x80000000
 				#echo "DEBUG: patch DTB with mac addr"
-				#fdtput dtb.test --type ux '/soc/ethernet@1c50000' 'local-mac-address' 02 53 72 0d 43 5b
+				#fdtput /tmp/dtb --type ux '/soc/ethernet@1c50000' 'local-mac-address' 02 53 72 0d 43 5b
 			fi
 		;;
 		bootz)
 			if [ $HAVEDTB -eq 1 ];then
+				echo "DEBUG: patch DTB with bootargs"
+				echo "DEBUG: dtb: add choosen"
+				fdtput -c /tmp/dtb '/chosen'
+				echo "DEBUG: dtb: add bootargs"
+				fdtput /tmp/dtb --type s '/chosen' 'bootargs' "$BOOTARGS"
 				echo "DEBUG: diff dtb"
 				dtc --sort -I dtb /tmp/dtb > /tmp/dtb.job
 				diff -u /tmp/dtb.job /tmp/dtb.current
 			fi
 			echo "DEBUG: bootz: run kexec with $KEXEC_OPTS"
-			#kexec --debug --no-checks --force --mem-min 0x30000000 --mem-max 0x9fffffff /tmp/kernel $KEXEC_OPTS
-			kexec /tmp/kernel $KEXEC_OPTS
+			kexec /tmp/kernel $KEXEC_OPTS --command-line="$BOOTARGS"
 		;;
 		bootm)
 			echo "DEBUG: run kexec with $KEXEC_OPTS"
