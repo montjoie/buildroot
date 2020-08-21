@@ -1,0 +1,137 @@
+#!/bin/sh
+
+NFS_SERVER=
+NFS_PATH=
+DEBUG=n
+
+log_info() { echo "$0[$$]: $@" >&2; }
+log_error() { echo "$0[$$]: ERROR $@" >&2; }
+
+do_mount_fs() {
+	log_info "mounting FS: $@"
+	[[ -e /proc/filesystems ]] && { grep -q "$1" /proc/filesystems || { log_error "Unknown filesystem: $1"; return 1; } }
+	[[ -d "$2" ]] || mkdir -p "$2"
+	[[ -e /proc/mounts ]] && { grep -q -e "^$1 $2 $1" /proc/mounts && { log_info "$2 ($1) already mounted"; return 0; } }
+	mount -t "$1" "$1" "$2"
+	return $?
+}
+
+bail_out() {
+	log_error "$@"
+	dmesg | tail
+	log_info "Rebooting..."
+	exit 1
+	exec reboot -f
+}
+
+export PATH=/sbin:/usr/sbin:/bin:/usr/bin
+
+log_info "starting initrd script for NFS"
+
+do_mount_fs proc /proc
+do_mount_fs sysfs /sys
+do_mount_fs devtmpfs /dev
+#do_mount_fs devpts /dev/pts
+#do_mount_fs tmpfs /dev/shm
+do_mount_fs tmpfs /tmp
+do_mount_fs tmpfs /run
+#mount -t nfsd nfsd /proc/fs/nfsd
+do_mount_fs nfsd /proc/fs/nfsd
+
+#log_info "Start RPC"
+#/usr/sbin/rpc.statd -h
+#/usr/sbin/rpc.statd
+
+log_info "Start nfs"
+#/usr/sbin/rpc.nfsd -h
+#/usr/sbin/rpc.nfsd
+/etc/init.d/S30rpcbind start
+/etc/init.d/S60nfs start
+
+# parse kernel commandline to get NFS server
+for x in $(cat /proc/cmdline); do
+	case $x in
+		nfsroot=*)
+			#NFS_SERVER=${x/*=/}
+			NFS_SERVER=$(echo $x |cut -d= -f2 | cut -d: -f1)
+			NFS_PATH=$(echo $x |cut -d: -f2 | cut -d, -f1)
+			NFS_OPTS=$(echo $x |cut -d, -f2-)
+		;;
+	esac
+done
+
+log_info "NFS parameters: server $NFS_SERVER, path $NFS_PATH, opts $NFS_OPTS"
+
+rpcinfo $NFS_SERVER
+
+# mount NFS
+mkdir -p /sysroot || bail_out "Unable to create /sysroot"
+mount $NFS_SERVER:$NFS_PATH -o $NFS_OPTS,nolock,noatime /sysroot
+if [ $? -ne 0 ];then
+	echo "DEBUG: try with forced v3"
+	mount $NFS_SERVER:$NFS_PATH -o $NFS_OPTS,nolock,noatime,vers=3 /sysroot
+	if [ $? -ne 0 ];then
+		echo "DEBUG: try with forced v4"
+		mount $NFS_SERVER:$NFS_PATH -o $NFS_OPTS,nolock,noatime,vers=4 /sysroot
+		if [ $? -ne 0 ];then
+			bail_out "Unable to mount root NFS device"
+		fi
+	fi
+fi
+
+df -h
+
+# move mounted devices to new root
+cd /sysroot
+for x in dev sys tmp run; do
+	log_info "Moving /$x to new rootfs"
+	mount -o move /$x $x
+done
+
+if [ -e /etc/resolv.conf ];then
+	echo "Copy resolv.conf"
+	ls -l /etc/resolv.conf
+	cp /etc/resolv.conf /sysroot/etc/
+else
+	echo "No resolv.conf to copy"
+	# TODO solution of doing a link like said in https://www.kernel.org/doc/Documentation/filesystems/nfs/nfsroot.txt
+	grep nameserver /proc/net/pnp > /sysroot/etc/resolv.conf
+fi
+chmod 644 /sysroot/etc/resolv.conf
+
+#log_info "=================="
+#echo "Try mouting /proc"
+#mount -t proc none /sysroot/proc
+#echo "Try mount /proc loop"
+#mount -o bind /proc /sysroot/proc
+
+if [ -e /sysroot/etc/gentoo-release ];then
+	echo "DEBUG: gentoo hacks"
+	sed -i 's,root:.*,root:$6$p3gorwcg$ly73iRHcUPeR4WI2pRWbJv5Gg9SOtPGIHsFN.PH7b94U.F9vebcLVFBMAvJMurxLsKt6i/ZnLmuPj7JfD0d5k/:16834:0:::::,' /sysroot/etc/shadow
+	echo 'hostname="gentooci"' > /sysroot/etc/conf.d/hostname
+	CONSOLE=$(grep -o 'console=tty[A-Z0-9a-z]*' /proc/cmdline | cut -d= -f2)
+	echo "DEBUG: try adding $CONSOLE in inittab"
+	#TODO BAUDRATE
+	sed -i 's,^s0,#s0,' /sysroot/etc/inittab
+	echo "s0:12345:respawn:/sbin/agetty -L 115200 $CONSOLE vt100" >> /sysroot/etc/inittab
+
+	echo "rc_nocolor=YES" >> /sysroot/etc/rc.conf
+
+	mkdir /sysroot/usr/portage
+	mkdir /sysroot/usr/local/portage
+fi
+
+echo "Switch root!!!"
+exec switch_root /sysroot /sbin/init
+echo "Should never be seen"
+
+exec chroot /sysroot /sbin/init
+bail_out
+
+# switch to new rootfs
+log_info "Switching to new rootfs $(pwd)"
+mkdir -p run/initramfs
+pivot_root . run/initramfs || bail_out "pivot_root failed."
+
+exec /sbin/init </dev/console >/dev/console 2>&1
+bail_out
