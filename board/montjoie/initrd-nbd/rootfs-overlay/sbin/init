@@ -1,0 +1,106 @@
+#!/bin/sh
+
+NBD_SERVER=
+NBD_PORT=10809
+NBD_DEV=/dev/nbd0
+DEBUG=n
+
+log_info() { echo "$0[$$]: $@" >&2; }
+log_error() { echo "$0[$$]: ERROR $@" >&2; }
+
+do_mount_fs() {
+	log_info "mounting FS: $@"
+	[[ -e /proc/filesystems ]] && { grep -q "$1" /proc/filesystems || { log_error "Unknown filesystem"; return 1; } }
+	[[ -d "$2" ]] || mkdir -p "$2"
+	[[ -e /proc/mounts ]] && { grep -q -e "^$1 $2 $1" /proc/mounts && { log_info "$2 ($1) already mounted"; return 0; } }
+	mount -t "$1" "$1" "$2"
+	return $?
+}
+
+bail_out() {
+	log_error "$@"
+	dmesg | tail
+	log_info "Rebooting..."
+	exit 1
+	exec reboot -f
+}
+
+export PATH=/sbin:/usr/sbin:/bin:/usr/bin
+
+log_info "starting initrd script"
+
+do_mount_fs proc /proc
+do_mount_fs sysfs /sys
+do_mount_fs devtmpfs /dev
+#do_mount_fs devpts /dev/pts
+#do_mount_fs tmpfs /dev/shm
+do_mount_fs tmpfs /tmp
+do_mount_fs tmpfs /run
+
+# parse kernel commandline to get NBD server
+for x in $(cat /proc/cmdline); do
+	case $x in
+		nbd.server=*) NBD_SERVER=${x/*=/};;
+		nbd.port=*) NBD_PORT=${x/*=/};;
+		nbd.dev=*)  NBD_DEV=/dev/${x/*=/};;
+		nbd.debug=*) DEBUG=${x/*=/};;
+	esac
+done
+
+log_info "NBD parameters: device $NBD_DEV, server $NBD_SERVER:$NBD_PORT"
+
+# start nbd client
+try=5
+while :;do
+	log_info "Starting NBD client"
+	nbd-client $NBD_SERVER $NBD_PORT $NBD_DEV && { log_info "NBD client successfully started"; break; }
+	log_info "NBD client failed"
+	[[ $try -gt 0 ]] && { log_info "Retrying ($try trie(s) left)..."; sleep 3; try=$(( try - 1 )); continue; }
+
+	bail_out "Unable to mount NBD device $NBD_DEV using server $NBD_SERVER:$NBD_PORT"
+done
+
+# mount NBD device
+mkdir -p /sysroot || bail_out "Unable to create /sysroot"
+mount $NBD_DEV -o noatime /sysroot || bail_out "Unable to mount root NBD device"
+
+df -h
+
+# move mounted devices to new root
+cd /sysroot
+for x in dev sys tmp run; do
+	log_info "Moving /$x to new rootfs"
+	mount -o move /$x $x
+done
+
+if [ -e /etc/resolv.conf ];then
+	echo "Copy resolv.conf"
+	ls -l /etc/resolv.conf
+	cp /etc/resolv.conf /sysroot/etc/
+else
+	echo "No resolv.conf to copy"
+	# TODO solution of doing a link like said in https://www.kernel.org/doc/Documentation/filesystems/nfs/nfsroot.txt
+	grep nameserver /proc/net/pnp > /sysroot/etc/resolv.conf
+fi
+chmod 644 /sysroot/etc/resolv.conf
+
+#log_info "=================="
+#echo "Try mouting /proc"
+#mount -t proc none /sysroot/proc
+#echo "Try mount /proc loop"
+#mount -o bind /proc /sysroot/proc
+
+echo "Switch root!!!"
+exec switch_root /sysroot /sbin/init
+echo "Should never be seen"
+
+exec chroot /sysroot /sbin/init
+bail_out
+
+# switch to new rootfs
+log_info "Switching to new rootfs $(pwd)"
+mkdir -p run/initramfs
+pivot_root . run/initramfs || bail_out "pivot_root failed."
+
+exec /sbin/init </dev/console >/dev/console 2>&1
+bail_out
