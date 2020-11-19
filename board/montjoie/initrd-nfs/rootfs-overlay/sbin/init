@@ -107,18 +107,38 @@ chmod 644 /sysroot/etc/resolv.conf
 
 if [ -e /sysroot/etc/gentoo-release ];then
 	echo "DEBUG: gentoo hacks"
-	sed -i 's,root:.*,root:$6$p3gorwcg$ly73iRHcUPeR4WI2pRWbJv5Gg9SOtPGIHsFN.PH7b94U.F9vebcLVFBMAvJMurxLsKt6i/ZnLmuPj7JfD0d5k/:16834:0:::::,' /sysroot/etc/shadow
-	echo 'hostname="gentooci"' > /sysroot/etc/conf.d/hostname
+	#sed -i 's,root:.*,root:$6$p3gorwcg$ly73iRHcUPeR4WI2pRWbJv5Gg9SOtPGIHsFN.PH7b94U.F9vebcLVFBMAvJMurxLsKt6i/ZnLmuPj7JfD0d5k/:16834:0:::::,' /sysroot/etc/shadow
+	#echo 'hostname="gentooci"' > /sysroot/etc/conf.d/hostname
 	CONSOLE=$(grep -o 'console=tty[A-Z0-9a-z]*' /proc/cmdline | cut -d= -f2)
-	echo "DEBUG: try adding $CONSOLE in inittab"
+	#echo "DEBUG: try adding $CONSOLE in inittab"
 	#TODO BAUDRATE
-	sed -i 's,^s0,#s0,' /sysroot/etc/inittab
-	echo "s0:12345:respawn:/sbin/agetty -L 115200 $CONSOLE vt100" >> /sysroot/etc/inittab
+	#cp /sysroot/etc/inittab /sysroot/etc/inittab.old
+	#sed -i 's,^s0,#s0,' /sysroot/etc/inittab
+	#echo "s0:12345:respawn:/sbin/agetty -L 115200 $CONSOLE vt100" >> /sysroot/etc/inittab
+	#diff -u /sysroot/etc/inittab.old /sysroot/etc/inittab
 
-	echo "rc_nocolor=YES" >> /sysroot/etc/rc.conf
+	#echo "rc_nocolor=YES" >> /sysroot/etc/rc.conf
 
-	mkdir /sysroot/usr/portage
+	PORTDIR='/var/db/repos/gentoo/'
+	DISTDIR='/var/cache/distfiles'
+	PKGDIR='/var/cache/binpkgs'
 	mkdir /sysroot/usr/local/portage
+	mkdir -p "/sysroot/$DISTDIR"
+	mkdir -p "/sysroot/$PKGDIR"
+	mkdir -p "/sysroot/$PORTDIR"
+
+	echo "PORTDIR=\"$PORTDIR\"" >> /sysroot/etc/portage/make.conf
+	echo "PKGDIR=\"$PKGDIR\"" >> /sysroot/etc/portage/make.conf
+	echo "DISTDIR=\"$DISTDIR\"" >> /sysroot/etc/portage/make.conf
+
+	echo "Mount portage on $PORTDIR"
+	mkdir -pv "/sysroot/$PDIR"
+	mount $NFS_SERVER:/usr/portage -o $NFS_OPTS,nolock,noatime,vers=3 "/sysroot/$PORTDIR"
+	echo "Mount portage on $DISTDIR"
+	mount $NFS_SERVER:/usr/portage/distfiles -o $NFS_OPTS,nolock,noatime,vers=3 "/sysroot/$DISTDIR"
+	MYARCH="$(uname -m)"
+	echo "Mount packages for $MYARCH on $PKGDIR"
+	mount $NFS_SERVER:/var/cache/packages/$MYARCH/ -o $NFS_OPTS,nolock,noatime,vers=3 "/sysroot/$PKGDIR"
 fi
 
 echo "Switch root!!!"
